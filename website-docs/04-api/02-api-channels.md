@@ -29,7 +29,9 @@ API key：`manage_channels`/full。IM 渠道携带外部 bot 凭证：列表 Vie
 | `platform` | string | 是 | `wecom/feishu/lark/slack/telegram/dingtalk/mattermost/wechat/qqbot/yunzhijia` |
 | `name` | string | 否 | 显示名 |
 | `mode` | string | 否 | `websocket`（默认；mattermost/yunzhijia 默认 `webhook`）/`webhook`/`longpoll`（wechat 强制 longpoll） |
-| `output_mode` | string | 否 | `stream`（默认）/`full`（wechat 强制 full） |
+| `output_mode` | string | 否 | `stream`（默认；微信合并分段发送）/`full`（最终回复） |
+| `show_thinking` | boolean | 否 | 默认 false，微信实时模式发送显式思考；full 模式保留值但不发送 |
+| `show_tool_hints` | boolean | 否 | 默认 false，微信实时模式发送工具状态；不包含原始参数或完整结果 |
 | `locale` | string | 否 | 回复语言：`zh-CN`/`en-US`/`ja-JP`/`ko-KR`/`ru-RU`；空（默认）使用部署默认语言（`WEKNORA_LANGUAGE`，未设置为 `zh-CN`）；其他值 400 |
 | `session_mode` | string | 否 | `user`（默认）/`thread` |
 | `knowledge_base_id` | string | 否 | 附件额外入库的 KB，须属于本空间，否则 400 |
@@ -467,3 +469,5 @@ curl $BASE/r/abc123 -o file.png
 ## 实现参考
 
 路由注册：`internal/router/routes_agent.go` 的 `RegisterIMRoutes`、`RegisterIMChannelRoutes`、`RegisterEmbedChannelRoutes`、`RegisterEmbedPublicRoutes`；`internal/router/files.go` 的 `serveFilesWithResources`、`servePresignedFiles`、`servePresignedPreview`、`serveResourceGrants`。Handler：`internal/handler/im.go`、`internal/handler/wechat_qrcode.go`、`internal/handler/embed_channel.go`。
+
+微信通道更新可选择 `output_mode: full | stream`，连接方式固定为 `longpoll`。更新省略 `show_thinking`、`show_tool_hints` 或 `credentials` 时保留旧值。列表摘要包含展示设置及 `credentials_configured`，不返回凭据。

@@ -355,10 +355,13 @@ export interface IMChannel {
   enabled: boolean;
   mode: 'webhook' | 'websocket' | 'longpoll';
   output_mode: 'stream' | 'full';
+  show_thinking?: boolean;
+  show_tool_hints?: boolean;
   locale?: '' | 'zh-CN' | 'zh-TW' | 'en-US' | 'ko-KR' | 'ja-JP' | 'ru-RU';
   session_mode?: 'user' | 'thread';
   knowledge_base_id?: string;
-  credentials: Record<string, any>;
+  credentials?: Record<string, any>;
+  credentials_configured?: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -379,6 +382,8 @@ export interface IMChannelOverview {
   enabled: boolean;
   mode: IMChannel['mode'];
   output_mode: IMChannel['output_mode'];
+  show_thinking?: boolean;
+  show_tool_hints?: boolean;
   locale?: IMChannel['locale'];
   session_mode?: IMChannel['session_mode'];
   bot_identity: string;

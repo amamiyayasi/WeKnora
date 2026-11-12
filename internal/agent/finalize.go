@@ -95,7 +95,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 						ctx,
 						event.Event{
 							ID: answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
-							Data: event.AgentFinalAnswerData{Replace: true},
+							Data: event.AgentFinalAnswerData{
+								Committed: true, Replace: true},
 						},
 					)
 				}
@@ -117,7 +118,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 						Type:      event.EventAgentFinalAnswer,
 						SessionID: sessionID,
 						Data: event.AgentFinalAnswerData{
-							Content: answerContent,
+							Committed: true,
+							Content:   answerContent,
 						},
 					})
 					answerStreamed = true
@@ -157,7 +159,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		if answerStreamed {
 			_ = e.eventBus.Emit(ctx, event.Event{
 				ID: answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
-				Data: event.AgentFinalAnswerData{Replace: true},
+				Data: event.AgentFinalAnswerData{
+					Committed: true, Replace: true},
 			})
 		}
 		answerStreamed, providerDone, terminalContent = false, false, ""
@@ -174,7 +177,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	_, tail := splitter.Flush()
 	_ = e.eventBus.Emit(ctx, event.Event{
 		ID: answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
-		Data: event.AgentFinalAnswerData{Content: terminalContent + tail, Done: true},
+		Data: event.AgentFinalAnswerData{
+			Committed: true, Content: terminalContent + tail, Done: true},
 	})
 
 	// Safety net: strip any residual <think> blocks that may have leaked through

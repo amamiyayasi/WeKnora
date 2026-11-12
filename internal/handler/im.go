@@ -64,7 +64,9 @@ func (h *IMHandler) CreateIMChannel(c *gin.Context) {
 		Platform        string     `json:"platform" binding:"required"`
 		Name            string     `json:"name"`
 		Mode            string     `json:"mode"`
-		OutputMode      string     `json:"output_mode"`
+		OutputMode      string     `json:"output_mode" binding:"omitempty,oneof=full stream"`
+		ShowThinking    bool       `json:"show_thinking"`
+		ShowToolHints   bool       `json:"show_tool_hints"`
 		Locale          string     `json:"locale"`
 		SessionMode     string     `json:"session_mode"`
 		KnowledgeBaseID string     `json:"knowledge_base_id"`
@@ -87,16 +89,18 @@ func (h *IMHandler) CreateIMChannel(c *gin.Context) {
 	}
 
 	channel := &im.IMChannel{
-		TenantID:    tenantID,
-		AgentID:     agentID,
-		Platform:    req.Platform,
-		Name:        req.Name,
-		Mode:        req.Mode,
-		OutputMode:  req.OutputMode,
-		Locale:      locale,
-		SessionMode: req.SessionMode,
-		Credentials: req.Credentials,
-		Enabled:     true,
+		TenantID:      tenantID,
+		AgentID:       agentID,
+		Platform:      req.Platform,
+		Name:          req.Name,
+		Mode:          req.Mode,
+		OutputMode:    req.OutputMode,
+		ShowThinking:  req.ShowThinking,
+		ShowToolHints: req.ShowToolHints,
+		Locale:        locale,
+		SessionMode:   req.SessionMode,
+		Credentials:   req.Credentials,
+		Enabled:       true,
 	}
 	// The route guard passes an agent it cannot find in this workspace; both
 	// the agent and the file-saving KB must belong to the channel's workspace.
@@ -111,10 +115,12 @@ func (h *IMHandler) CreateIMChannel(c *gin.Context) {
 	if req.Enabled != nil {
 		channel.Enabled = *req.Enabled
 	}
-	// WeChat uses long-polling mode and full output only
+	// WeChat transport remains long-polling; output mode is configurable.
 	if req.Platform == "wechat" {
 		channel.Mode = "longpoll"
-		channel.OutputMode = "full"
+		if channel.OutputMode == "" {
+			channel.OutputMode = "stream"
+		}
 	} else {
 		if channel.Mode == "" {
 			if channel.Platform == "mattermost" || channel.Platform == "yunzhijia" {
@@ -224,7 +230,9 @@ func (h *IMHandler) UpdateIMChannel(c *gin.Context) {
 	var req struct {
 		Name            *string    `json:"name"`
 		Mode            *string    `json:"mode"`
-		OutputMode      *string    `json:"output_mode"`
+		OutputMode      *string    `json:"output_mode" binding:"omitempty,oneof=full stream"`
+		ShowThinking    *bool      `json:"show_thinking"`
+		ShowToolHints   *bool      `json:"show_tool_hints"`
 		Locale          *string    `json:"locale"`
 		SessionMode     *string    `json:"session_mode"`
 		KnowledgeBaseID *string    `json:"knowledge_base_id"`
@@ -245,6 +253,15 @@ func (h *IMHandler) UpdateIMChannel(c *gin.Context) {
 	}
 	if req.OutputMode != nil {
 		channel.OutputMode = *req.OutputMode
+	}
+	if channel.Platform == "wechat" {
+		channel.Mode = "longpoll"
+	}
+	if req.ShowThinking != nil {
+		channel.ShowThinking = *req.ShowThinking
+	}
+	if req.ShowToolHints != nil {
+		channel.ShowToolHints = *req.ShowToolHints
 	}
 	if req.Locale != nil {
 		locale, err := normalizeIMLocale(*req.Locale)

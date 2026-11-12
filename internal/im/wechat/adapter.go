@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/im"
@@ -65,6 +66,9 @@ func newBaseInfo() baseInfo {
 
 // Adapter implements im.Adapter for WeChat via iLink Bot API.
 type Adapter struct {
+	channelCtx context.Context
+	turns      sync.Map
+	deliveries sync.Map
 	botToken   string
 	ilinkBotID string
 }
@@ -96,8 +100,57 @@ func (a *Adapter) HandleURLVerification(c *gin.Context) bool {
 	return false
 }
 
+type userDelivery struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+// SendChunk serializes messages for this adapter's user, without retrying unknown sends.
+func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, text string) error {
+	if a.channelCtx != nil {
+		if err := a.channelCtx.Err(); err != nil {
+			return err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(a.channelCtx, cancel)
+		defer stop()
+		defer cancel()
+	}
+	value, _ := a.deliveries.LoadOrStore(incoming.UserID, &userDelivery{})
+	delivery := value.(*userDelivery)
+	delivery.mu.Lock()
+	defer delivery.mu.Unlock()
+	if turn, ok := a.turns.Load(incoming.UserID); ok {
+		turn.(*typingTurn).stop()
+	}
+	for _, part := range im.SplitReplyText(text) {
+		if wait := time.Until(delivery.last.Add(2 * time.Second)); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		delivery.last = time.Now()
+		if err := a.sendText(ctx, incoming, part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SendReply sends a text reply to the user via iLink /ilink/bot/sendmessage API.
 func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, reply *im.ReplyMessage) error {
+	return a.SendChunk(ctx, incoming, reply.Content)
+}
+
+func (a *Adapter) sendText(ctx context.Context, incoming *im.IncomingMessage, text string) error {
 	contextToken := ""
 	if incoming.Extra != nil {
 		contextToken = incoming.Extra["context_token"]
@@ -114,7 +167,7 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 			"item_list": []map[string]interface{}{
 				{
 					"type":      1, // TEXT
-					"text_item": map[string]string{"text": reply.Content},
+					"text_item": map[string]string{"text": text},
 				},
 			},
 			"context_token": contextToken,
@@ -123,24 +176,6 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	return a.ilinkPost(ctx, "/ilink/bot/sendmessage", payload)
-}
-
-// SendTyping sends a typing indicator to the user.
-func (a *Adapter) SendTyping(ctx context.Context, incoming *im.IncomingMessage) error {
-	userID := incoming.UserID
-	contextToken := ""
-	if incoming.Extra != nil {
-		contextToken = incoming.Extra["context_token"]
-	}
-	_ = contextToken // typing may not need context_token
-
-	payload := map[string]interface{}{
-		"ilink_user_id": userID,
-		"status":        1, // TYPING
-		"base_info":     newBaseInfo(),
-	}
-
-	return a.ilinkPost(ctx, "/ilink/bot/sendtyping", payload)
 }
 
 // DownloadFile downloads a media file from the iLink CDN.
@@ -279,6 +314,10 @@ func hexDecode(s string) ([]byte, error) {
 
 // ilinkPost sends a POST request to the iLink API with authentication headers.
 func (a *Adapter) ilinkPost(ctx context.Context, path string, payload interface{}) error {
+	return a.ilinkJSON(ctx, path, payload, nil)
+}
+
+func (a *Adapter) ilinkJSON(ctx context.Context, path string, payload interface{}, result any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
@@ -303,9 +342,24 @@ func (a *Adapter) ilinkPost(ctx context.Context, path string, payload interface{
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ilink api %s returned status %d: %s", path, resp.StatusCode, string(respBody))
+		return fmt.Errorf("ilink api %s returned status %d", path, resp.StatusCode)
 	}
 
+	var status *struct {
+		Ret     int `json:"ret"`
+		ErrCode int `json:"errcode"`
+	}
+	if err := json.Unmarshal(respBody, &status); err != nil || status == nil {
+		return fmt.Errorf("ilink api %s: invalid response", path)
+	}
+	if status.Ret != 0 || status.ErrCode != 0 {
+		return fmt.Errorf("ilink api %s failed: ret=%d errcode=%d", path, status.Ret, status.ErrCode)
+	}
+	if result != nil {
+		if err := json.Unmarshal(respBody, result); err != nil {
+			return fmt.Errorf("ilink api %s: invalid response", path)
+		}
+	}
 	return nil
 }
 

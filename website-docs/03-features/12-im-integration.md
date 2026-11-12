@@ -24,7 +24,7 @@ IM 集成将智能体接入企业微信、飞书、钉钉、Slack、Telegram 等
 | Telegram `telegram` | **websocket**（长轮询 getUpdates）/ webhook | 是（消息编辑） | 是 | 是（Forum Topics 的 `message_thread_id`） | `bot_token`；webhook 另有 `secret_token` |
 | 钉钉 `dingtalk` | **websocket**（Stream 模式，v0.8.2 起仅支持此模式；升级迁移 000096 会把 webhook 渠道改为 websocket，需在钉钉开发者后台开启 Stream） | 是（AI 卡片） | 是 | 否 | `client_id`、`client_secret`、`card_template_id` |
 | Mattermost `mattermost` | **webhook**（仅支持 Outgoing Webhook + REST API） | 是 | 是 | 是（`root_id`） | `site_url`、`bot_token`、`outgoing_token`（必填）、`bot_user_id`、`post_to_main` |
-| 微信 `wechat`（iLink 机器人） | **longpoll**（强制；创建时后端强制 `mode=longpoll`、`output_mode=full`） | 否（仅整段输出） | 是 | 否 | `bot_token`、`ilink_bot_id`（均必填） |
+| 微信 `wechat`（iLink 机器人） | **longpoll**（强制） | 是（合并后的追加消息，不覆盖同一气泡） | 是 | 否 | `bot_token`、`ilink_bot_id`（均必填） |
 | QQ 机器人 `qqbot` | **websocket**（仅支持） | 否 | 否 | 否 | `app_id`、`client_secret`、`api_base_url`、`gateway_url` |
 | 云之家 `yunzhijia` | **webhook** / websocket（从 `send_msg_url` 推导 WS 地址） | 否 | 是 | 是（顶层 msgId / 回复 replyRootMsgId） | `send_msg_url`（必填）、`secret`、`app_id`、`app_secret`、`allowed_webhook_host_suffix`、`timeout_seconds` |
 
@@ -104,8 +104,9 @@ flowchart LR
 | 字段 | 说明 |
 | --- | --- |
 | `AgentID` | 绑定的自定义智能体；回答走该 Agent 的配置（模型、知识库、Skills、MCP、联网搜索） |
-| `Platform` / `Mode` | 平台与接入模式。默认值：mattermost/yunzhijia → `webhook`，wechat → `longpoll`（且强制 `output_mode=full`），其余 → `websocket` |
-| `OutputMode` | `stream`（默认，流式）或 `full`（等完整答案后一次性回复） |
+| `Platform` / `Mode` | 平台与接入模式。默认值：mattermost/yunzhijia → `webhook`，wechat → `longpoll`，其余 → `websocket` |
+| `OutputMode` | `stream`（默认，流式；微信为追加消息）或 `full`（等完整答案后回复，超长时分段） |
+| `ShowThinking` / `ShowToolHints` | 微信实时模式的思考／工具状态展示，默认 false；full 模式不发送过程，仍保留配置 |
 | `Locale` | 回复语言：`zh-CN` / `en-US` / `ja-JP` / `ko-KR` / `ru-RU`，其他值返回 400。留空（默认）使用 `WEKNORA_LANGUAGE`，未设置时为 `zh-CN`。IM 回调请求头里的 `Accept-Language` 来自平台而非提问者，因此不参与决定回复语言 |
 | `KnowledgeBaseID` | 可选"文件知识库"。无论是否配置，文件/图片都会下载后供 QA 理解；配置后会额外在后台入库（见下文） |
 | `SessionMode` | `user`（默认，按 平台+用户+群 维度映射会话）或 `thread`（按 平台+线程+群 维度，每个顶层消息开新会话） |
@@ -121,7 +122,7 @@ flowchart LR
 | `POST /api/v1/agents/:id/im-channels` | 为 Agent 创建渠道（校验 platform 合法性、填充默认 mode/output_mode） |
 | `GET /api/v1/agents/:id/im-channels` | 列出 Agent 的渠道（不含凭据） |
 | `GET /api/v1/im-channels` | 租户内跨 Agent 渠道总览 |
-| `PUT /api/v1/im-channels/:id` | 局部更新（name/mode/output_mode/locale/session_mode/knowledge_base_id/credentials/enabled/agent_id）；`knowledge_base_id` 传空字符串即解除文件知识库 |
+| `PUT /api/v1/im-channels/:id` | 局部更新（name/mode/output_mode/show_thinking/show_tool_hints/locale/session_mode/knowledge_base_id/credentials/enabled/agent_id）；`knowledge_base_id` 传空字符串即解除文件知识库 |
 | `DELETE /api/v1/im-channels/:id` | 删除 |
 | `POST /api/v1/im-channels/:id/toggle` | 启用/停用 |
 | `POST /api/v1/wechat/qrcode`、`POST /api/v1/wechat/qrcode/status` | 微信（iLink）扫码绑定：生成二维码并轮询状态 |
@@ -273,3 +274,16 @@ imService.RegisterAdapterFactory("yunzhijia", yunzhijia.NewFactory())
 - 各平台适配器：`internal/im/{wecom,feishu,dingtalk,slack,telegram,mattermost,wechat,qqbot,yunzhijia}/`
 - HTTP 接口层：`internal/handler/im.go`
 - 路由：`internal/router/routes_agent.go` 的 `RegisterIMRoutes` / `RegisterIMChannelRoutes`
+
+
+## 微信输入状态与实时回复
+
+微信通道在开始处理消息时通过 iLink `getconfig` 获取 `typing_ticket`，调用 `sendtyping(status=1)` 并每 5 秒刷新。输入状态请求最多等待 3 秒；发送可见内容前、任务结束、失败或取消时停止续期并调用 `status=2`。输入状态失败不会阻止模型执行，不额外发送占位气泡。
+
+新通道默认 `stream`，已有通道的 `output_mode` 不变。实时模式分开处理正文、显式思考事件和工具状态。普通 ReAct 正文暂存至确认终稿；工具已经结束的最终合成可提前分段。完整段落优先合并，消息间隔至少 2 秒，每条最多 2000 个 Unicode 字符；这些是客户端策略，不是微信官方限额。
+
+`show_thinking` 与 `show_tool_hints` 默认关闭，只在实时模式生效。工具状态不附带原始参数或完整工具结果。输入状态、正文发送和等待均按当前通道与用户隔离；失败后不重跑问答补发，不因未知发送结果而重发整篇。模型若明确修订已发送正文，会提示以下方新版本为准；微信里的旧气泡无法撤回。
+
+列表继续隐藏凭据。编辑已有绑定的展示配置不需要重新扫码，更新请求省略 `credentials` 即保留已有凭据；两个展示字段省略时同样保留原值。
+
+发布前核对运行版本及现网定制补丁。与 Miko 配套时先更新兼容 `full/stream` 且重扫保留设置的连接管理 API，再更新 WeKnora；本功能不要求额外网关服务。回退旧运行版本前先把微信通道切回 `full`，保留新增列和原配置，避免丢失展示偏好。本地构建、接口夹具和截图不代表真实微信验收通过。
