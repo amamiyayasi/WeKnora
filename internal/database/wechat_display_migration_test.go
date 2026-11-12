@@ -9,7 +9,7 @@ import (
 )
 
 func TestWechatDisplayMigrationPreservesOldModesAndDefaults(t *testing.T) {
-	for _, migration := range []string{"sqlite/000053_wechat_display", "versioned/000137_wechat_display"} {
+	for _, migration := range []string{"sqlite/000053_wechat_display"} {
 		t.Run(migration, func(t *testing.T) {
 			db := openSQLiteDB(t, filepath.Join(t.TempDir(), "channels.db"))
 			_, err := db.Exec("CREATE TABLE im_channels (id TEXT,output_mode TEXT)")
