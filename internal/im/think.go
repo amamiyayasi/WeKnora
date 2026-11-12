@@ -51,7 +51,9 @@ const (
 
 // IMStreamParts separates stream content for IM display.
 type IMStreamParts struct {
-	Mode IMStreamMode
+	AnswerRevision  int
+	ExplicitThought string // Explicit model thought events only, never retracted answer text.
+	Mode            IMStreamMode
 
 	// Quick-QA (RagPipelineProgress on Web):
 	PipelineToolSteps []IMToolStep // query_understand / knowledge_search rows

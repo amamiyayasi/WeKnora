@@ -211,6 +211,8 @@ type MemoryRecalledData struct {
 
 // AgentFinalAnswerData represents final answer streaming data
 type AgentFinalAnswerData struct {
+	// Committed marks tool-free final synthesis; ordinary ReAct chunks may still be retracted.
+	Committed bool `json:"committed,omitempty"`
 	// Replace retracts only this event ID after explicit provider protocol evidence.
 	Replace    bool   `json:"replace,omitempty"`
 	Content    string `json:"content"`

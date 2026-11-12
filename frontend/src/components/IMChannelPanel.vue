@@ -169,22 +169,43 @@
                   $t('agentEditor.im.modeHint') }}
             </p>
           </div>
+        </section>
 
+        <section class="setting-drawer__section im-drawer__section">
           <div class="form-item">
             <label class="form-label required">{{ $t('agentEditor.im.outputMode') }}</label>
             <div class="option-chips">
               <button type="button" class="option-chip"
                 :class="{ 'option-chip--active': formData.output_mode === 'stream' }"
                 @click="formData.output_mode = 'stream'">
-                {{ $t('agentEditor.im.outputStream') }}
+                {{ $t(formData.platform === 'wechat' ? 'agentEditor.im.wechatOutputStream' : 'agentEditor.im.outputStream') }}
               </button>
               <button type="button" class="option-chip"
                 :class="{ 'option-chip--active': formData.output_mode === 'full' }"
                 @click="formData.output_mode = 'full'">
-                {{ $t('agentEditor.im.outputFull') }}
+                {{ $t(formData.platform === 'wechat' ? 'agentEditor.im.wechatOutputFull' : 'agentEditor.im.outputFull') }}
               </button>
             </div>
           </div>
+          <template v-if="formData.platform === 'wechat'">
+            <p class="form-desc">{{ $t('agentEditor.im.wechatOutputHint') }}</p>
+            <div class="setting-row">
+              <label class="form-label">{{ $t('agentEditor.im.showThinking') }}</label>
+              <t-switch v-model="formData.show_thinking" :disabled="formData.output_mode === 'full'" size="small"
+                role="switch" :aria-label="$t('agentEditor.im.showThinking')" :aria-checked="formData.show_thinking"
+                :aria-disabled="formData.output_mode === 'full'" :tabindex="formData.output_mode === 'full' ? -1 : 0"
+                @keydown.space.prevent="formData.output_mode === 'stream' && (formData.show_thinking = !formData.show_thinking)"
+                @keydown.enter.prevent="formData.output_mode === 'stream' && (formData.show_thinking = !formData.show_thinking)" />
+            </div>
+            <div class="setting-row">
+              <label class="form-label">{{ $t('agentEditor.im.showToolHints') }}</label>
+              <t-switch v-model="formData.show_tool_hints" :disabled="formData.output_mode === 'full'" size="small"
+                role="switch" :aria-label="$t('agentEditor.im.showToolHints')" :aria-checked="formData.show_tool_hints"
+                :aria-disabled="formData.output_mode === 'full'" :tabindex="formData.output_mode === 'full' ? -1 : 0"
+                @keydown.space.prevent="formData.output_mode === 'stream' && (formData.show_tool_hints = !formData.show_tool_hints)"
+                @keydown.enter.prevent="formData.output_mode === 'stream' && (formData.show_tool_hints = !formData.show_tool_hints)" />
+            </div>
+          </template>
         </section>
 
         <section class="setting-drawer__section im-drawer__section">
@@ -747,6 +768,8 @@ const formData = ref({
   name: '',
   mode: 'websocket' as 'webhook' | 'websocket' | 'longpoll',
   output_mode: 'stream' as 'stream' | 'full',
+  show_thinking: false,
+  show_tool_hints: false,
   locale: '' as IMLocale,
   session_mode: 'user' as 'user' | 'thread',
   knowledge_base_id: '',
@@ -821,8 +844,8 @@ watch(
 // Whether WeChat credentials are already bound
 const wechatBound = computed(() => {
   return formData.value.platform === 'wechat' &&
-    formData.value.credentials.bot_token &&
-    formData.value.credentials.ilink_bot_id;
+    (formData.value.credentials.bot_token && formData.value.credentials.ilink_bot_id) ||
+    (!wechatQRImgUrl.value && editingChannel.value?.credentials_configured === true);
 });
 
 
@@ -834,10 +857,10 @@ function onPlatformChange(val: string | number | boolean) {
   wechatQRImgUrl.value = '';
   wechatQRCode.value = '';
   wechatQRStatus.value = '';
-  // WeChat uses fixed mode/output
+  // WeChat transport is fixed; new channels default to real-time replies.
   if (val === 'wechat') {
     formData.value.mode = 'longpoll';
-    formData.value.output_mode = 'full';
+    formData.value.output_mode = 'stream';
   } else if (val === 'mattermost' || val === 'yunzhijia') {
     formData.value.mode = 'webhook';
     formData.value.output_mode = 'stream';
@@ -1003,6 +1026,8 @@ async function editChannel(channel: IMChannel | IMChannelOverview) {
     name: fullChannel.name,
     mode: fullChannel.mode,
     output_mode: fullChannel.output_mode,
+    show_thinking: fullChannel.show_thinking ?? false,
+    show_tool_hints: fullChannel.show_tool_hints ?? false,
     locale: fullChannel.locale || '',
     session_mode: fullChannel.session_mode || 'user',
     knowledge_base_id: fullChannel.knowledge_base_id || '',
@@ -1028,6 +1053,8 @@ function resetForm() {
     name: defaultChannelName('wecom'),
     mode: 'websocket',
     output_mode: 'stream',
+    show_thinking: false,
+    show_tool_hints: false,
     locale: '',
     session_mode: 'user',
     knowledge_base_id: '',
@@ -1039,7 +1066,7 @@ async function handleSave() {
   saving.value = true;
   try {
     // For WeChat, validate that credentials are bound
-    if (formData.value.platform === 'wechat' && !formData.value.credentials.bot_token) {
+    if (formData.value.platform === 'wechat' && !wechatBound.value) {
       MessagePlugin.warning(t('agentEditor.im.wechatScanBind'));
       return;
     }
@@ -1058,10 +1085,11 @@ async function handleSave() {
         name: resolvedChannelName(),
         mode: formData.value.mode,
         output_mode: formData.value.output_mode,
+        ...(formData.value.platform === 'wechat' ? { show_thinking: formData.value.show_thinking, show_tool_hints: formData.value.show_tool_hints } : {}),
         locale: formData.value.locale,
         session_mode: formData.value.session_mode,
         knowledge_base_id: normalizeOptionalString(formData.value.knowledge_base_id),
-        credentials: formData.value.credentials,
+        ...(formData.value.platform !== 'wechat' || formData.value.credentials.bot_token ? { credentials: formData.value.credentials } : {}),
         enabled: editingEnabled.value,
         ...(formData.value.target_agent_id ? { agent_id: formData.value.target_agent_id } : {}),
       });
@@ -1077,6 +1105,7 @@ async function handleSave() {
         name: resolvedChannelName(),
         mode: formData.value.mode,
         output_mode: formData.value.output_mode,
+        ...(formData.value.platform === 'wechat' ? { show_thinking: formData.value.show_thinking, show_tool_hints: formData.value.show_tool_hints } : {}),
         locale: formData.value.locale,
         session_mode: formData.value.session_mode,
         knowledge_base_id: normalizeOptionalString(formData.value.knowledge_base_id),

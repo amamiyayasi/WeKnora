@@ -23,6 +23,8 @@ type IMChannel struct {
 	Name            string         `json:"name"        gorm:"type:varchar(255);not null;default:''"`
 	Enabled         bool           `json:"enabled"     gorm:"not null;default:true"`
 	Mode            string         `json:"mode"        gorm:"type:varchar(20);not null;default:'websocket'"`
+	ShowThinking    bool           `json:"show_thinking" gorm:"not null;default:false"`
+	ShowToolHints   bool           `json:"show_tool_hints" gorm:"not null;default:false"`
 	OutputMode      string         `json:"output_mode"       gorm:"type:varchar(20);not null;default:'stream'"`
 	Locale          string         `json:"locale"            gorm:"type:varchar(16);not null;default:''"`
 	KnowledgeBaseID string         `json:"knowledge_base_id" gorm:"type:varchar(36);default:''"`
@@ -49,6 +51,8 @@ type IMChannelSummary struct {
 	Name                  string    `json:"name"`
 	Enabled               bool      `json:"enabled"`
 	Mode                  string    `json:"mode"`
+	ShowThinking          bool      `json:"show_thinking"`
+	ShowToolHints         bool      `json:"show_tool_hints"`
 	OutputMode            string    `json:"output_mode"`
 	Locale                string    `json:"locale"`
 	KnowledgeBaseID       string    `json:"knowledge_base_id"`
@@ -70,6 +74,8 @@ func SummarizeIMChannel(ch IMChannel) IMChannelSummary {
 		Enabled:               ch.Enabled,
 		Mode:                  ch.Mode,
 		OutputMode:            ch.OutputMode,
+		ShowThinking:          ch.ShowThinking,
+		ShowToolHints:         ch.ShowToolHints,
 		Locale:                ch.Locale,
 		KnowledgeBaseID:       ch.KnowledgeBaseID,
 		BotIdentity:           ch.BotIdentity,

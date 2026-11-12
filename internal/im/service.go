@@ -1635,6 +1635,8 @@ func sameChannelRuntimeConfig(cached, fresh *IMChannel) bool {
 		cached.Enabled == fresh.Enabled &&
 		cached.Mode == fresh.Mode &&
 		cached.OutputMode == fresh.OutputMode &&
+		cached.ShowThinking == fresh.ShowThinking &&
+		cached.ShowToolHints == fresh.ShowToolHints &&
 		cached.Locale == fresh.Locale &&
 		cached.KnowledgeBaseID == fresh.KnowledgeBaseID &&
 		cached.SessionMode == fresh.SessionMode &&
@@ -1972,6 +1974,10 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// runQA after the assistant message is created (that's when we have the
 	// sessionID + messageID needed to poll StreamManager).
 
+	if lifecycle, ok := req.adapter.(ReplyLifecycle); ok {
+		defer lifecycle.BeginReply(ctx, req.msg)()
+	}
+
 	// kbIDs is left empty so the QA pipeline resolves them from the agent config.
 	var kbIDs []string
 	attachments, imageURLs, downloaded, err := s.prepareIMAttachments(ctx, req.msg, req.adapter)
@@ -2005,6 +2011,12 @@ func (s *Service) executeQARequest(req *qaRequest) {
 			}
 			return
 		}
+	} else if sender, ok := req.adapter.(AppendSender); ok {
+		writer := newAppendReply(req.channel, func(outCtx context.Context, text string) error { return sender.SendChunk(outCtx, req.msg, text) })
+		if err := s.handleMessageOutput(ctx, req.msg, req.session, req.agent, kbIDs, attachments, imageURLs, nil, req.adapter, req.userKey, req.tenant, writer); err != nil {
+			logger.Warn(ctx, "[IM] Append reply delivery failed")
+		}
+		return
 	} else if streamer, ok := req.adapter.(StreamSender); ok {
 		// Stream mode sends intermediate reasoning and answer updates.
 		if err := s.handleMessageStream(
@@ -2024,6 +2036,9 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	}
 
 	outCtx := imOutboundContext(ctx)
+	if _, ok := req.adapter.(AppendSender); ok && err == nil {
+		outCtx = ctx
+	}
 	reply := &ReplyMessage{
 		Content: formatIMOutboundAnswerOrFallback(outCtx, answer,
 			s.newOutboundFileServiceResolver(req.tenant, req.agent, kbIDs)),
@@ -2511,11 +2526,19 @@ func briefToolSummary(output string) string {
 // in real-time via the StreamSender interface. Chunks are batched at streamFlushInterval
 // to avoid API rate-limiting.
 func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, attachments types.MessageAttachments, imageURLs []string, streamer StreamSender, adapter Adapter, userKey string, tenant *types.Tenant) error {
+	return s.handleMessageOutput(ctx, msg, session, customAgent, kbIDs, attachments, imageURLs, streamer, adapter, userKey, tenant, nil)
+}
+
+func (s *Service) handleMessageOutput(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, attachments types.MessageAttachments, imageURLs []string, streamer StreamSender, adapter Adapter, userKey string, tenant *types.Tenant, appendOutput *appendReply) error {
 	// Start the stream on the IM platform (e.g., create Feishu streaming card)
-	streamID, err := streamer.StartStream(ctx, msg)
-	if err != nil {
-		logger.Warnf(ctx, "[IM] StartStream failed, falling back to non-streaming: %v", err)
-		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, attachments, imageURLs, adapter, userKey, tenant)
+	var streamID string
+	if appendOutput == nil {
+		var err error
+		streamID, err = streamer.StartStream(ctx, msg)
+		if err != nil {
+			logger.Warnf(ctx, "[IM] StartStream failed, falling back to non-streaming: %v", err)
+			return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, attachments, imageURLs, adapter, userKey, tenant)
+		}
 	}
 
 	// Prepare the QA pipeline
@@ -2529,8 +2552,11 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 
 	var (
 		bufMu           sync.Mutex
-		reasoningInner  streamSection   // quick QA: model reasoning_content
-		agentInner      streamSection   // agent: retracted text + thoughts
+		reasoningInner  streamSection // quick QA: model reasoning_content
+		agentInner      streamSection // agent: retracted text + thoughts
+		explicitThought strings.Builder
+		answerRevision  int
+		committedAnswer strings.Builder
 		agentLiveAnswer strings.Builder // agent: optimistic answer before tool retract
 		answerOuter     strings.Builder // final answer for display persistence
 		answerBuilder   strings.Builder // answer persisted to DB
@@ -2594,12 +2620,14 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		}
 		return IMStreamParts{
 			Mode:              mode,
-			PipelineToolSteps: pipelineToolSteps,
+			PipelineToolSteps: append([]IMToolStep(nil), pipelineToolSteps...),
 			ReasoningInner:    reasoningInner.text.String(),
 			AgentInner:        agentInner.text.String(),
-			AgentToolSteps:    agentToolSteps,
+			AgentToolSteps:    append([]IMToolStep(nil), agentToolSteps...),
 			LiveAnswer:        agentLiveAnswer.String(),
 			Answer:            answerOuter.String(),
+			ExplicitThought:   explicitThought.String(),
+			AnswerRevision:    answerRevision,
 		}
 	}
 
@@ -2611,6 +2639,19 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		}
 
 		bufMu.Lock()
+		if appendOutput != nil && data.Replace {
+			answerRevision++
+			committedAnswer.Reset()
+			agentLiveAnswer.Reset()
+			answerOuter.Reset()
+			answerBuilder.Reset()
+		}
+		if data.Committed {
+			if appendOutput != nil && committedAnswer.Len() == 0 {
+				agentLiveAnswer.Reset()
+			}
+			committedAnswer.WriteString(data.Content)
+		}
 		if useAgent && !agentDone {
 			if data.Content != "" {
 				agentLiveAnswer.WriteString(data.Content)
@@ -2638,6 +2679,9 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		bufMu.Lock()
 		qaErr = fmt.Errorf("QA pipeline error: %s", data.Error)
 		bufMu.Unlock()
+		if appendOutput != nil {
+			qaCancel()
+		}
 		closeDone()
 		closeComplete()
 		return nil
@@ -2668,6 +2712,13 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		agentCompleteFinalAnswer = data.FinalAnswer
 		applyIMCompleteDataToMessage(assistantMsg, data)
 		mergeIMAgentAnswerBuffers(&answerBuilder, &answerOuter, &agentLiveAnswer, data.FinalAnswer)
+		if appendOutput != nil && data.FinalAnswer != "" {
+			answerBuilder.Reset()
+			answerBuilder.WriteString(data.FinalAnswer)
+			answerOuter.Reset()
+			answerOuter.WriteString(data.FinalAnswer)
+			agentLiveAnswer.Reset()
+		}
 		bufMu.Unlock()
 		closeComplete()
 		// Execute can emit EventError after Complete. The AgentQA return path
@@ -2682,6 +2733,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			return nil
 		}
 		bufMu.Lock()
+		explicitThought.WriteString(data.Content)
 		if useAgent {
 			agentWrite(data.Content)
 		} else {
@@ -2841,6 +2893,9 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			bufMu.Lock()
 			qaErr = fmt.Errorf("QA execution error: %w", err)
 			bufMu.Unlock()
+			if appendOutput != nil {
+				qaCancel()
+			}
 			closeDone()
 			closeComplete()
 		}
@@ -2852,12 +2907,30 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	ticker := time.NewTicker(streamFlushInterval)
 	defer ticker.Stop()
 	fileResolver := s.newOutboundFileServiceResolver(tenant, customAgent, kbIDs)
+	if appendOutput != nil {
+		appendOutput.clean = func(ctx context.Context, text string) string { return cleanIMContent(ctx, text, fileResolver) }
+	}
 
 	flush := func() {
 		bufMu.Lock()
 		parts := getStreamParts()
 		agentRunning := useAgent && !agentDone
+		failed := qaErr != nil
+		if appendOutput != nil && agentRunning {
+			parts.Answer = committedAnswer.String()
+		}
 		bufMu.Unlock()
+		if appendOutput != nil {
+			if failed || qaCtx.Err() != nil {
+				return
+			}
+			parts.Answer = FormatIMDisplayContent(parts.Answer, StreamDisplayFinal)
+			if cut := holdbackCutoff(parts.Answer); cut < len(parts.Answer) {
+				parts.Answer = parts.Answer[:cut]
+			}
+			_ = appendOutput.flush(qaCtx, parts, false)
+			return
+		}
 
 		displaySource := FormatIMIntermediateFromParts(parts, agentRunning)
 		if displaySource == "" {
@@ -2908,29 +2981,51 @@ loop:
 	bufMu.Unlock()
 
 	outCtx := imOutboundContext(ctx)
-	finalDisplay := cleanIMContent(outCtx, FormatIMFinalFromParts(parts), fileResolver)
+	rawFinalDisplay := FormatIMFinalFromParts(parts)
+	finalDisplay := cleanIMContent(outCtx, rawFinalDisplay, fileResolver)
 	if noVisibleContent || finalDisplay == "" {
 		fallback := imNoAnswerFallback
 		if finalErr != nil {
 			fallback = imQAFailureReply(finalErr)
 		}
 		finalDisplay = fallback
+		rawFinalDisplay = fallback
 		if answer == "" {
 			answer = fallback
 		}
 	}
 	if notice := s.buildIMMCPAuthNotice(ctx, authServices); notice != "" {
 		finalDisplay = appendIMAuthNotice(finalDisplay, notice)
+		rawFinalDisplay = appendIMAuthNotice(rawFinalDisplay, notice)
 		answer = appendIMAuthNotice(answer, notice)
 	}
 
-	finalizeErr := streamer.FinalizeStream(outCtx, msg, streamID, finalDisplay)
+	var finalizeErr, endErr error
+	if appendOutput != nil {
+		if qaCtx.Err() != nil || finalErr != nil {
+			failure := finalErr
+			if failure == nil {
+				failure = qaCtx.Err()
+			}
+			finalizeErr = appendOutput.fail(outCtx, failure)
+		} else {
+			parts.Answer = rawFinalDisplay
+			finalizeErr = appendOutput.flush(qaCtx, parts, true)
+			if qaCtx.Err() != nil {
+				finalizeErr = appendOutput.fail(outCtx, qaCtx.Err())
+			}
+		}
+	} else {
+		finalizeErr = streamer.FinalizeStream(outCtx, msg, streamID, finalDisplay)
+	}
 	if finalizeErr != nil {
 		logger.Warnf(ctx, "[IM] FinalizeStream failed: %v", finalizeErr)
 	}
 
 	// End the stream
-	endErr := streamer.EndStream(outCtx, msg, streamID)
+	if appendOutput == nil {
+		endErr = streamer.EndStream(outCtx, msg, streamID)
+	}
 	if endErr != nil {
 		logger.Warnf(ctx, "[IM] EndStream failed: %v", endErr)
 	}
@@ -2938,7 +3033,7 @@ loop:
 	// Match full-output delivery: a failed card replacement must not strand the
 	// answer in the database while the user only sees intermediate progress.
 	var fallbackErr error
-	if finalizeErr != nil {
+	if finalizeErr != nil && appendOutput == nil {
 		fallbackErr = adapter.SendReply(outCtx, msg, &ReplyMessage{Content: finalDisplay, IsFinal: true})
 		if fallbackErr != nil {
 			logger.Errorf(ctx, "[IM] Plain reply fallback after stream finalize failure failed: %v", fallbackErr)
@@ -2955,6 +3050,9 @@ loop:
 		logger.Warnf(ctx, "[IM] Failed to update assistant message: %v", err)
 	}
 
+	if appendOutput != nil {
+		return finalizeErr
+	}
 	if finalizeErr != nil && fallbackErr != nil {
 		return errors.Join(finalizeErr, endErr, fallbackErr)
 	}
@@ -3192,20 +3290,22 @@ func (s *Service) ListChannelsByAgent(agentID string, tenantID uint64) ([]IMChan
 // tenant-scoped list endpoint; callers that need credentials must use the
 // per-agent endpoint which enforces the same tenant scope anyway.
 type ChannelWithAgent struct {
-	ID          string    `json:"id"`
-	TenantID    uint64    `json:"tenant_id"`
-	AgentID     string    `json:"agent_id"`
-	AgentName   string    `json:"agent_name"`
-	Platform    string    `json:"platform"`
-	Name        string    `json:"name"`
-	Enabled     bool      `json:"enabled"`
-	Mode        string    `json:"mode"`
-	OutputMode  string    `json:"output_mode"`
-	Locale      string    `json:"locale"`
-	SessionMode string    `json:"session_mode"`
-	BotIdentity string    `json:"bot_identity"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	TenantID      uint64    `json:"tenant_id"`
+	AgentID       string    `json:"agent_id"`
+	AgentName     string    `json:"agent_name"`
+	Platform      string    `json:"platform"`
+	Name          string    `json:"name"`
+	Enabled       bool      `json:"enabled"`
+	Mode          string    `json:"mode"`
+	OutputMode    string    `json:"output_mode"`
+	ShowThinking  bool      `json:"show_thinking"`
+	ShowToolHints bool      `json:"show_tool_hints"`
+	Locale        string    `json:"locale"`
+	SessionMode   string    `json:"session_mode"`
+	BotIdentity   string    `json:"bot_identity"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // ListChannelsByTenant returns all non-deleted IM channels in the given tenant,
@@ -3219,7 +3319,7 @@ func (s *Service) ListChannelsByTenant(ctx context.Context, tenantID uint64) ([]
 	q := s.db.Table("im_channels AS c").
 		Select(`c.id, c.tenant_id, c.agent_id,
                 COALESCE(a.name, '') AS agent_name,
-                c.platform, c.name, c.enabled, c.mode, c.output_mode, c.locale,
+                c.platform, c.name, c.enabled, c.mode, c.output_mode, c.show_thinking, c.show_tool_hints, c.locale,
                 c.session_mode, c.bot_identity, c.created_at, c.updated_at`).
 		Joins(`LEFT JOIN custom_agents AS a
                ON a.id = c.agent_id AND a.tenant_id = c.tenant_id AND a.deleted_at IS NULL`).
