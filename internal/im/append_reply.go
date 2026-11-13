@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/Tencent/WeKnora/internal/logger"
 )
 
 // AppendSender sends new text rather than replacing a platform card.
@@ -81,6 +83,9 @@ func (a *appendReply) deliver(ctx context.Context, text string) error {
 		return nil
 	}
 	a.err = a.send(ctx, text)
+	if a.err == nil {
+		logger.Infof(ctx, "[IM] Append chunk sent: runes=%d", len([]rune(text)))
+	}
 	return a.err
 }
 

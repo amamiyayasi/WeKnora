@@ -22,6 +22,7 @@ func TestWechatAppendUsesOriginalQAAndPersistsFinal(t *testing.T) {
 		calls := 0
 		service := &Service{messageService: &deliveryMessageService{}, streamManager: &fullOutputStreamManager{}, sessionService: &exitSessionService{run: func(ctx context.Context, bus *event.EventBus) error {
 			calls++
+			require.Equal(t, true, ctx.Value(types.AppendOnlyAnswerContextKey))
 			_ = bus.Emit(ctx, event.Event{Type: event.EventAgentFinalAnswer, Data: event.AgentFinalAnswerData{Content: "先查一下（不能当正文）\n\n"}})
 			time.Sleep(3 * time.Second)
 			require.Empty(t, snapshot())
