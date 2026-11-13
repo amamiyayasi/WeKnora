@@ -28,6 +28,7 @@ func NewFactory() im.AdapterFactory {
 		client := NewLongPollClient(botToken, ilinkBotID, msgHandler)
 
 		pollCtx, pollCancel := context.WithCancel(context.Background())
+		adapter.channelCtx = pollCtx
 		go func() {
 			if err := client.Start(pollCtx); err != nil && pollCtx.Err() == nil {
 				logger.Errorf(context.Background(), "[IM] WeChat long-poll stopped for channel %s: %v", channel.ID, err)

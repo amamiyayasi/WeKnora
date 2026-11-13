@@ -33,10 +33,16 @@ func IsRAGPipelineToolName(name string) bool {
 // spans that merely show the tag text survive. A bare regex cannot tell a real
 // reasoning block from an example in the answer, and deleted the example.
 func StripThinkBlocks(content string) string {
+	return strings.TrimSpace(stripThinkBlocks(content))
+}
+
+// Keep paragraph boundaries while an append-only answer is still growing.
+func stripThinkBlocks(content string) string {
 	if content == "" {
 		return ""
 	}
-	return strings.TrimSpace(agenttools.StripThinkBlocks(content))
+	_, answer := agenttools.SplitThinkContent(content)
+	return answer
 }
 
 // IMStreamMode distinguishes agent reasoning from quick-QA RAG pipeline display.
@@ -47,9 +53,17 @@ const (
 	IMStreamModeQuickQA
 )
 
+type IMProgressStep struct {
+	ID      string
+	Content string
+}
+
 // IMStreamParts separates stream content for IM display.
 type IMStreamParts struct {
-	Mode IMStreamMode
+	Progress        []IMProgressStep
+	AnswerRevision  int
+	ExplicitThought string // Explicit model thought events only, never retracted answer text.
+	Mode            IMStreamMode
 
 	// Quick-QA (RagPipelineProgress on Web):
 	PipelineToolSteps []IMToolStep // query_understand / knowledge_search rows

@@ -81,6 +81,8 @@ func newLifecycleTestDB(t *testing.T) *gorm.DB {
 		enabled NUMERIC NOT NULL DEFAULT 1,
 		mode TEXT NOT NULL DEFAULT 'websocket',
 		output_mode TEXT NOT NULL DEFAULT 'stream',
+		show_thinking BOOLEAN NOT NULL DEFAULT FALSE,
+		show_tool_hints BOOLEAN NOT NULL DEFAULT FALSE,
 		locale TEXT NOT NULL DEFAULT '',
 		knowledge_base_id TEXT DEFAULT '',
 		bot_identity TEXT NOT NULL DEFAULT '',

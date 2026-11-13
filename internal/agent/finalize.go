@@ -95,7 +95,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 						ctx,
 						event.Event{
 							ID: answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
-							Data: event.AgentFinalAnswerData{Replace: true},
+							Data: event.AgentFinalAnswerData{
+								Committed: true, Replace: true},
 						},
 					)
 				}
@@ -117,7 +118,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 						Type:      event.EventAgentFinalAnswer,
 						SessionID: sessionID,
 						Data: event.AgentFinalAnswerData{
-							Content: answerContent,
+							Committed: true,
+							Content:   answerContent,
 						},
 					})
 					answerStreamed = true
@@ -138,10 +140,14 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 					llmResult.FinishReason, llmResult.Usage.PromptTokens, llmResult.Usage.CompletionTokens)
 			}
 		}
+		if ctx.Value(types.AppendOnlyAnswerContextKey) == true && err != nil && llmResult != nil {
+			state.FinalAnswer = agenttools.StripThinkBlocks(llmResult.Content)
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if err == nil || attempt == 1 || !overflow {
+		// A published append-only answer cannot be replaced by an overflow retry.
+		if err == nil || attempt == 1 || !overflow || (ctx.Value(types.AppendOnlyAnswerContextKey) == true && answerStreamed) {
 			break
 		}
 		logger.Warnf(ctx, "[Agent][FinalAnswer] Context overflow; compacting before one retry: %v", err)
@@ -157,7 +163,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		if answerStreamed {
 			_ = e.eventBus.Emit(ctx, event.Event{
 				ID: answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
-				Data: event.AgentFinalAnswerData{Replace: true},
+				Data: event.AgentFinalAnswerData{
+					Committed: true, Replace: true},
 			})
 		}
 		answerStreamed, providerDone, terminalContent = false, false, ""
@@ -174,7 +181,8 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	_, tail := splitter.Flush()
 	_ = e.eventBus.Emit(ctx, event.Event{
 		ID: answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
-		Data: event.AgentFinalAnswerData{Content: terminalContent + tail, Done: true},
+		Data: event.AgentFinalAnswerData{
+			Committed: true, Content: terminalContent + tail, Done: true},
 	})
 
 	// Safety net: strip any residual <think> blocks that may have leaked through
@@ -263,7 +271,9 @@ func (e *AgentEngine) handleMaxIterations(
 		common.PipelineError(ctx, "Agent", "final_answer_failed", map[string]interface{}{
 			"error": err.Error(),
 		})
-		state.FinalAnswer = "Sorry, I was unable to generate a complete answer."
+		if ctx.Value(types.AppendOnlyAnswerContextKey) != true || state.FinalAnswer == "" {
+			state.FinalAnswer = "Sorry, I was unable to generate a complete answer."
+		}
 		state.IsComplete = true
 		return fmt.Errorf("failed to synthesize final answer after max iterations: %w", err)
 	}
