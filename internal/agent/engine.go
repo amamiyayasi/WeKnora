@@ -236,6 +236,9 @@ func (e *AgentEngine) buildSystemPrompt(ctx context.Context) string {
 		logger.Debugf(ctx, "[Agent][Prompt] section=%s bytes=%d", section.Name, len(section.Content))
 	}
 	prompt := renderSystemPromptSections(sections) + e.collaborationGuidance()
+	if ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil) {
+		prompt += "\n\nFor this channel, tool-capable rounds decide and perform any needed tool work. Once ready, end the decision round with a brief readiness acknowledgement rather than writing the final response. A separate tool-free final delivery stage will generate the response."
+	}
 	if e.runNote != "" {
 		prompt += "\n\n" + e.runNote
 	}
@@ -1323,6 +1326,14 @@ func (e *AgentEngine) runReActIteration(
 					Data: event.AgentFinalAnswerData{Content: verdict.finalAnswer, Truncated: verdict.truncated},
 				},
 			)
+		}
+		if ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil) && response.FinishReason != "content_filter" && !verdict.truncated {
+			state.RoundSteps = append(state.RoundSteps, verdict.step)
+			if err := e.streamFinalAnswerToEventBus(ctx, query, state, sessionID, *messagesPtr); err != nil {
+				return iterOutcomeBreak, err
+			}
+			state.IsComplete = true
+			return iterOutcomeBreak, nil
 		}
 		state.FinalAnswer = verdict.finalAnswer
 		state.IsComplete = true

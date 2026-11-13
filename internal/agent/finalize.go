@@ -46,6 +46,9 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		"remaining work and explain any missing evidence. Use the user's requested " +
 		"language and format. Do not claim that an unperformed action " +
 		"succeeded.\"}</runtime_event>"
+	if ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil) {
+		runtimeNotice += "\nThis is now the tool-free final delivery stage. Generate the user's complete response directly, not a readiness acknowledgement."
+	}
 	if e.finalAnswerNeedsCompaction(messages, runtimeNotice) {
 		messages, _ = e.compactFinalAnswerContext(ctx, messages, state.CurrentRound+1,
 			runtimeNotice, compaction.ReasonThreshold)

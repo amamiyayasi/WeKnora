@@ -4,6 +4,8 @@ package types
 type ContextKey string
 
 const (
+	// AppendOnlyAnswerContextKey requests a tool-free final generation for non-retractable transports.
+	AppendOnlyAnswerContextKey ContextKey = "AppendOnlyAnswer"
 	// TenantIDContextKey scopes execution (repository/model queries).
 	TenantIDContextKey ContextKey = "TenantID"
 	// CallerContextKey captures the authenticated resource caller.

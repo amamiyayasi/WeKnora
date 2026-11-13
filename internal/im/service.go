@@ -2548,6 +2548,9 @@ func (s *Service) handleMessageOutput(ctx context.Context, msg *IncomingMessage,
 	defer qaCancel()
 
 	useAgent := customAgent != nil && customAgent.IsAgentMode()
+	if appendOutput != nil && useAgent {
+		qaCtx = context.WithValue(qaCtx, types.AppendOnlyAnswerContextKey, true)
+	}
 	eventBus := event.NewEventBus()
 
 	var (
