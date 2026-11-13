@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,8 +102,10 @@ func (a *Adapter) HandleURLVerification(c *gin.Context) bool {
 }
 
 type userDelivery struct {
-	mu   sync.Mutex
-	last time.Time
+	mu            sync.Mutex
+	last          time.Time
+	messageID     string
+	acceptedParts int
 }
 
 // SendChunk serializes messages for this adapter's user, without retrying unknown sends.
@@ -121,6 +124,11 @@ func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, t
 	delivery := value.(*userDelivery)
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
+	if delivery.messageID != incoming.MessageID {
+		delivery.messageID = incoming.MessageID
+		delivery.acceptedParts = 0
+	}
+
 	if turn, ok := a.turns.Load(incoming.UserID); ok {
 		turn.(*typingTurn).stop()
 	}
@@ -139,8 +147,9 @@ func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, t
 		}
 		delivery.last = time.Now()
 		if err := a.sendText(ctx, incoming, part); err != nil {
-			return err
+			return fmt.Errorf("wechat delivery accepted_parts=%d part_runes=%d: %w", delivery.acceptedParts, len([]rune(part)), err)
 		}
+		delivery.acceptedParts++
 	}
 	return nil
 }
@@ -346,14 +355,31 @@ func (a *Adapter) ilinkJSON(ctx context.Context, path string, payload interface{
 	}
 
 	var status *struct {
-		Ret     int `json:"ret"`
-		ErrCode int `json:"errcode"`
+		Ret     int    `json:"ret"`
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
 	}
 	if err := json.Unmarshal(respBody, &status); err != nil || status == nil {
 		return fmt.Errorf("ilink api %s: invalid response", path)
 	}
 	if status.Ret != 0 || status.ErrCode != 0 {
-		return fmt.Errorf("ilink api %s failed: ret=%d errcode=%d", path, status.Ret, status.ErrCode)
+		// Only fixed reason labels may enter logs; arbitrary upstream text may contain secrets.
+		reason := "other"
+		switch strings.ToLower(strings.TrimSpace(status.ErrMsg)) {
+		case "":
+			reason = "unspecified"
+		case "prepare failed":
+			reason = "prepare_failed"
+		case "unknown error":
+			reason = "unknown_error"
+		case "invalid arguments":
+			reason = "invalid_arguments"
+		case "session timeout":
+			reason = "session_timeout"
+		case "rate limit", "rate limited":
+			reason = "rate_limited"
+		}
+		return fmt.Errorf("ilink api %s failed: ret=%d errcode=%d reason=%s", path, status.Ret, status.ErrCode, reason)
 	}
 	if result != nil {
 		if err := json.Unmarshal(respBody, result); err != nil {

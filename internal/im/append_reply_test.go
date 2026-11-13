@@ -52,8 +52,8 @@ func TestAppendReplyFiltersProgressAndStopsAfterUnknownSend(t *testing.T) {
 	}
 	var attempts int
 	reply := newAppendReply(&IMChannel{}, func(context.Context, string) error { attempts++; return errors.New("unknown send") })
-	require.Error(t, reply.flush(context.Background(), IMStreamParts{Answer: "回答"}, true))
-	require.Error(t, reply.flush(context.Background(), IMStreamParts{Answer: "回答"}, true))
+	require.ErrorContains(t, reply.flush(context.Background(), IMStreamParts{Answer: "回答"}, true), "phase=answer")
+	require.ErrorContains(t, reply.flush(context.Background(), IMStreamParts{Answer: "回答"}, true), "phase=answer")
 	require.Equal(t, 1, attempts)
 }
 
@@ -81,4 +81,15 @@ func TestAppendReplyProviderReplacementLabelsAlreadyVisibleRevision(t *testing.T
 	require.NoError(t, reply.flush(context.Background(), IMStreamParts{Answer: "初稿\n\n尚未发送"}, false))
 	require.NoError(t, reply.flush(context.Background(), IMStreamParts{Answer: "修订后的完整回答", AnswerRevision: 1}, true))
 	require.Equal(t, []string{"初稿\n\n", "回答已修订，请以下面的内容为准。", "修订后的完整回答"}, sent)
+}
+
+func TestCompletedReplyPacksLinesInsteadOfSendingShortParagraphAlone(t *testing.T) {
+	prefix := strings.Repeat("中", 900) + "\n\n## 技术结论\n\n"
+	body := prefix + strings.Repeat("🙂", 700) + "\n" + strings.Repeat("文", 700)
+	parts := SplitReplyText(body)
+	require.Len(t, parts, 2)
+	require.Greater(t, len([]rune(parts[0])), 1600)
+	require.False(t, strings.HasSuffix(strings.TrimSpace(parts[0]), "## 技术结论"))
+	require.Equal(t, body, strings.Join(parts, ""))
+	require.Equal(t, prefix, nextAppendText(body, false), "live output still waits for complete paragraphs")
 }

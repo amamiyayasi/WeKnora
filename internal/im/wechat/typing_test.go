@@ -189,3 +189,48 @@ func TestTypingAndPacingAreScopedToChannelAndUser(t *testing.T) {
 		}
 	})
 }
+
+func TestSendFailurePreservesSafeReasonAndAcceptedProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		old := ilinkHTTPClient
+		defer func() { ilinkHTTPClient = old }()
+		attempts := 0
+		ilinkHTTPClient = &http.Client{Transport: ilinkTransport(func(r *http.Request) (*http.Response, error) {
+			attempts++
+			response := `{"ret":0}`
+			if attempts >= 2 {
+				response = `{"ret":-2,"errmsg":"prepare failed"}`
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
+		})}
+		adapter := NewAdapter("bot-secret", "id")
+		msg := &im.IncomingMessage{MessageID: "request", UserID: "user", Extra: map[string]string{"context_token": "ticket-secret"}}
+		err := adapter.SendChunk(context.Background(), msg, strings.Repeat("中", 4001))
+		if err == nil || !strings.Contains(err.Error(), "accepted_parts=1") || !strings.Contains(err.Error(), "reason=prepare_failed") {
+			t.Fatalf("missing delivery diagnostic: %v", err)
+		}
+		if attempts != 2 {
+			t.Fatalf("unexpected retry: %d", attempts)
+		}
+		if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "中") {
+			t.Fatal("sensitive send metadata leaked")
+		}
+		msg.MessageID = "next-request"
+		err = adapter.SendChunk(context.Background(), msg, "next message")
+		if err == nil || !strings.Contains(err.Error(), "accepted_parts=0") {
+			t.Fatalf("progress leaked across requests: %v", err)
+		}
+	})
+}
+
+func TestIlinkDoesNotExposeUnknownErrorText(t *testing.T) {
+	old := ilinkHTTPClient
+	defer func() { ilinkHTTPClient = old }()
+	ilinkHTTPClient = &http.Client{Transport: ilinkTransport(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ret":-2,"errmsg":"credential-or-body-secret"}`))}, nil
+	})}
+	err := NewAdapter("bot", "id").SendChunk(context.Background(), &im.IncomingMessage{MessageID: "request", UserID: "user"}, "private body")
+	if err == nil || !strings.Contains(err.Error(), "reason=other") || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private body") {
+		t.Fatalf("unsafe diagnostic: %v", err)
+	}
+}
