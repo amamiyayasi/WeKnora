@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -68,15 +69,19 @@ func TestTypingFetchesTicketAndChecksBusinessErrors(t *testing.T) {
 	}
 }
 
-func TestTypingLifecycleRefreshesAndStopsBeforeContent(t *testing.T) {
+func TestTypingRemainsActiveAcrossPhaseAndFinalMessages(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		old := ilinkHTTPClient
 		defer func() { ilinkHTTPClient = old }()
 		var steps []string
 		var sentAt []time.Time
+		var mu sync.Mutex
+		snapshot := func() string { mu.Lock(); defer mu.Unlock(); return strings.Join(steps, ",") }
 		ilinkHTTPClient = &http.Client{Transport: ilinkTransport(func(r *http.Request) (*http.Response, error) {
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			defer mu.Unlock()
 			response := `{"ret":0}`
 			switch r.URL.Path {
 			case "/ilink/bot/getconfig":
@@ -94,27 +99,44 @@ func TestTypingLifecycleRefreshesAndStopsBeforeContent(t *testing.T) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
 		})}
 		adapter := NewAdapter("bot", "id")
-		msg := &im.IncomingMessage{UserID: "u"}
+		msg := &im.IncomingMessage{MessageID: "analysis", UserID: "u"}
 		stop := adapter.BeginReply(context.Background(), msg)
 		synctest.Wait()
+		if err := adapter.SendChunk(context.Background(), msg, "阶段正文"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if snapshot() != "start,text,start" {
+			t.Fatalf("phase must reassert typing without stop: %s", snapshot())
+		}
 		time.Sleep(5 * time.Second)
 		synctest.Wait()
-		if err := adapter.SendReply(context.Background(), msg, &im.ReplyMessage{Content: "回答"}); err != nil {
+		if snapshot() != "start,text,start,start" {
+			t.Fatalf("renewal stopped after phase: %s", snapshot())
+		}
+		if err := adapter.SendReply(context.Background(), msg, &im.ReplyMessage{Content: "最终正文"}); err != nil {
 			t.Fatal(err)
 		}
+		synctest.Wait()
 		stop()
-		if strings.Join(steps, ",") != "start,start,stop,text" {
-			t.Fatalf("order=%v", steps)
+		if snapshot() != "start,text,start,start,text,start,stop" {
+			t.Fatalf("turn did not stop after final delivery: %s", snapshot())
 		}
-		if err := adapter.SendChunk(context.Background(), msg, "剩余正文"); err != nil {
+		if err := adapter.SendChunk(context.Background(), &im.IncomingMessage{MessageID: "next", UserID: "u"}, "独立回复"); err != nil {
 			t.Fatal(err)
 		}
-		if sentAt[1].Sub(sentAt[0]) < 2*time.Second {
+		synctest.Wait()
+		mu.Lock()
+		gap := sentAt[2].Sub(sentAt[1])
+		mu.Unlock()
+		if gap < 2*time.Second {
 			t.Fatal("messages sent too quickly")
 		}
+		before := snapshot()
 		time.Sleep(6 * time.Second)
-		if strings.Join(steps, ",") != "start,start,stop,text,text" {
-			t.Fatalf("typing restarted: %v", steps)
+		synctest.Wait()
+		if snapshot() != before {
+			t.Fatalf("typing restarted after completion: %s", snapshot())
 		}
 	})
 }
@@ -233,4 +255,113 @@ func TestIlinkDoesNotExposeUnknownErrorText(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "reason=other") || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private body") {
 		t.Fatalf("unsafe diagnostic: %v", err)
 	}
+}
+
+func TestTypingCancelWaitsForPostMessageStartAndDoesNotRelight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		old := ilinkHTTPClient
+		defer func() { ilinkHTTPClient = old }()
+		starts, stops := 0, 0
+		ilinkHTTPClient = &http.Client{Transport: ilinkTransport(func(r *http.Request) (*http.Response, error) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			response := `{"ret":0,"typing_ticket":"ticket"}`
+			if strings.HasSuffix(r.URL.Path, "sendtyping") {
+				if body["status"] == float64(1) {
+					starts++
+					if starts == 2 {
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+				} else {
+					stops++
+				}
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
+		})}
+		adapter := NewAdapter("bot", "id")
+		msg := &im.IncomingMessage{MessageID: "analysis", UserID: "u"}
+		stop := adapter.BeginReply(context.Background(), msg)
+		synctest.Wait()
+		if err := adapter.SendChunk(context.Background(), msg, "阶段正文"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if starts != 2 {
+			t.Fatalf("missing post-message renewal: %d", starts)
+		}
+		stop()
+		synctest.Wait()
+		time.Sleep(6 * time.Second)
+		synctest.Wait()
+		if starts != 2 || stops != 1 {
+			t.Fatalf("cancel race: starts=%d stops=%d", starts, stops)
+		}
+	})
+}
+
+func TestTypingSurvivesCommandButStopsOnOwnDeliveryFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		old := ilinkHTTPClient
+		defer func() { ilinkHTTPClient = old }()
+		stops := 0
+		ilinkHTTPClient = &http.Client{Transport: ilinkTransport(func(r *http.Request) (*http.Response, error) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			response := `{"ret":0,"typing_ticket":"ticket"}`
+			if strings.HasSuffix(r.URL.Path, "sendmessage") {
+				response = `{"ret":-2}`
+			} else if strings.HasSuffix(r.URL.Path, "sendtyping") && body["status"] == float64(2) {
+				stops++
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
+		})}
+		adapter := NewAdapter("bot", "id")
+		msg := &im.IncomingMessage{MessageID: "analysis", UserID: "u"}
+		stop := adapter.BeginReply(context.Background(), msg)
+		synctest.Wait()
+		if err := adapter.SendChunk(context.Background(), &im.IncomingMessage{MessageID: "command", UserID: "u"}, "指令回复"); err == nil {
+			t.Fatal("expected rejection")
+		}
+		synctest.Wait()
+		if stops != 0 {
+			t.Fatal("command reply stopped active analysis")
+		}
+		if err := adapter.SendChunk(context.Background(), msg, "阶段正文"); err == nil {
+			t.Fatal("expected rejection")
+		}
+		synctest.Wait()
+		if stops != 1 {
+			t.Fatalf("failed delivery did not clear typing: %d", stops)
+		}
+		stop()
+	})
+}
+
+func TestTypingCancellationClearsUnknownFirstStartOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		old := ilinkHTTPClient
+		defer func() { ilinkHTTPClient = old }()
+		starts, stops := 0, 0
+		ilinkHTTPClient = &http.Client{Transport: ilinkTransport(func(r *http.Request) (*http.Response, error) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if strings.HasSuffix(r.URL.Path, "sendtyping") {
+				if body["status"] == float64(1) {
+					starts++
+					<-r.Context().Done()
+					return nil, r.Context().Err()
+				}
+				stops++
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ret":0,"typing_ticket":"ticket"}`))}, nil
+		})}
+		adapter := NewAdapter("bot", "id")
+		stop := adapter.BeginReply(context.Background(), &im.IncomingMessage{UserID: "u"})
+		synctest.Wait()
+		stop()
+		if starts != 1 || stops != 1 {
+			t.Fatalf("unknown initial status must be cleared: starts=%d stops=%d", starts, stops)
+		}
+	})
 }

@@ -123,9 +123,6 @@ func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, t
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
 
-	if turn, ok := a.turns.Load(incoming.UserID); ok {
-		turn.(*typingTurn).stop()
-	}
 	acceptedParts := 0
 	for _, part := range im.SplitReplyText(text) {
 		if wait := time.Until(delivery.last.Add(2 * time.Second)); wait > 0 {
@@ -142,9 +139,22 @@ func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, t
 		}
 		delivery.last = time.Now()
 		if err := a.sendText(ctx, incoming, part); err != nil {
+			if value, ok := a.turns.Load(incoming.UserID); ok {
+				turn := value.(*typingTurn)
+				if turn.messageID == incoming.MessageID {
+					turn.cancel()
+				}
+			}
 			return fmt.Errorf("wechat delivery accepted_parts_in_send=%d part_runes=%d: %w", acceptedParts, len([]rune(part)), err)
 		}
 		acceptedParts++
+		// A visible message may clear the client's light; reassert it asynchronously.
+		if value, ok := a.turns.Load(incoming.UserID); ok {
+			select {
+			case value.(*typingTurn).wake <- struct{}{}:
+			default:
+			}
+		}
 	}
 	return nil
 }
