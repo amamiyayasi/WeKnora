@@ -6,7 +6,7 @@
 
 12:11:33 的最终投递路径报 `/ilink/bot/sendmessage ret=-2 errcode=0`。旧代码只保留返回码，且运行日志级别为 warn，无法还原具体失败段号和 errmsg；不能认定为限流、固定票据 TTL 或缺少票据。用户截图证实已有部分终稿显示，因此不能把整个回答描述为完全没发送。
 
-本次补充首个发送失败的警告，包含 answer/progress/thinking/tools 阶段、失败块字数、该入站消息此前获得 HTTP 业务成功的块数和返回码。只有 prepare_failed、invalid_arguments 等固定白名单原因标签可进入日志，未知响应为 other；不记录原始 errmsg、凭据、票据、用户消息和正文。服务端业务成功不等于客户端可见。
+本次补充首个发送失败的警告，包含 answer/progress/thinking/tools 阶段、失败块字数、该问答此前完整获得 HTTP 业务成功的输出块数和本次发送调用中已成功的子块数和返回码。只有 prepare_failed、invalid_arguments 等固定白名单原因标签可进入日志，未知响应为 other；不记录原始 errmsg、凭据、票据、用户消息和正文。服务端业务成功不等于客户端可见。
 
 没有改变 token 选择、输入状态或自动重试。Octop 的每分钟 5 次滑动窗口和成功响应票据更新是对照差异，不是本次故障已证明的原因。官方仓库 Tencent/openclaw-weixin 文档仅建议回传入站 context_token；社区对时效的观察不一致，不将其当作官方限额。保留已有完整回答，不重新执行模型补发。
 

@@ -206,7 +206,7 @@ func TestSendFailurePreservesSafeReasonAndAcceptedProgress(t *testing.T) {
 		adapter := NewAdapter("bot-secret", "id")
 		msg := &im.IncomingMessage{MessageID: "request", UserID: "user", Extra: map[string]string{"context_token": "ticket-secret"}}
 		err := adapter.SendChunk(context.Background(), msg, strings.Repeat("中", 4001))
-		if err == nil || !strings.Contains(err.Error(), "accepted_parts=1") || !strings.Contains(err.Error(), "reason=prepare_failed") {
+		if err == nil || !strings.Contains(err.Error(), "accepted_parts_in_send=1") || !strings.Contains(err.Error(), "reason=prepare_failed") {
 			t.Fatalf("missing delivery diagnostic: %v", err)
 		}
 		if attempts != 2 {
@@ -217,7 +217,7 @@ func TestSendFailurePreservesSafeReasonAndAcceptedProgress(t *testing.T) {
 		}
 		msg.MessageID = "next-request"
 		err = adapter.SendChunk(context.Background(), msg, "next message")
-		if err == nil || !strings.Contains(err.Error(), "accepted_parts=0") {
+		if err == nil || !strings.Contains(err.Error(), "accepted_parts_in_send=0") {
 			t.Fatalf("progress leaked across requests: %v", err)
 		}
 	})
