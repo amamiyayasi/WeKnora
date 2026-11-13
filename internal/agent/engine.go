@@ -247,9 +247,6 @@ func (e *AgentEngine) buildSystemPrompt(ctx context.Context) string {
 		logger.Debugf(ctx, "[Agent][Prompt] section=%s bytes=%d", section.Name, len(section.Content))
 	}
 	prompt := renderSystemPromptSections(sections) + e.collaborationGuidance()
-	if ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil) {
-		prompt += "\n\nFor this channel, tool-capable rounds decide and perform any needed tool work. Once ready, end the decision round with a brief readiness acknowledgement rather than writing the final response. A separate tool-free final delivery stage will generate the response."
-	}
 	if e.runNote != "" {
 		prompt += "\n\n" + e.runNote
 	}
@@ -1338,13 +1335,11 @@ func (e *AgentEngine) runReActIteration(
 				},
 			)
 		}
-		if ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil) && response.FinishReason != "content_filter" && !verdict.truncated {
-			state.RoundSteps = append(state.RoundSteps, verdict.step)
-			if err := e.streamFinalAnswerToEventBus(ctx, query, state, sessionID, *messagesPtr); err != nil {
-				return iterOutcomeBreak, err
-			}
-			state.IsComplete = true
-			return iterOutcomeBreak, nil
+		if ctx.Value(types.AppendOnlyAnswerContextKey) == true {
+			_ = e.eventBus.Emit(ctx, event.Event{
+				ID: verdict.answerID, Type: event.EventAgentFinalAnswer, SessionID: sessionID,
+				Data: event.AgentFinalAnswerData{Content: verdict.finalAnswer, Committed: true, Replace: true},
+			})
 		}
 		state.FinalAnswer = verdict.finalAnswer
 		state.IsComplete = true
@@ -1374,7 +1369,7 @@ func (e *AgentEngine) runReActIteration(
 	// handler and the client keep text before a page button; retract it the
 	// same way.
 	progress := agenttools.StripThinkBlocks(response.Content)
-	if (buttonsRan || e.collaboration != nil && e.collaboration.Child == nil) && strings.TrimSpace(progress) != "" {
+	if (buttonsRan || e.collaboration != nil && e.collaboration.Child == nil || ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil)) && strings.TrimSpace(progress) != "" {
 		step.Progress = progress
 		progressID := response.AnswerEventID
 		if progressID == "" {

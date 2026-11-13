@@ -60,12 +60,13 @@ type appendReply struct {
 	send                    func(context.Context, string) error
 	answer, thought         string
 	revision                int
+	progress                map[string]string
 	tools                   map[string]string
 	err                     error
 }
 
 func newAppendReply(channel *IMChannel, send func(context.Context, string) error) *appendReply {
-	return &appendReply{showThinking: channel.ShowThinking, showTools: channel.ShowToolHints, send: send, tools: map[string]string{}}
+	return &appendReply{showThinking: channel.ShowThinking, showTools: channel.ShowToolHints, send: send, tools: map[string]string{}, progress: map[string]string{}}
 }
 
 func (a *appendReply) deliver(ctx context.Context, text string) error {
@@ -136,6 +137,14 @@ func (a *appendReply) flush(ctx context.Context, parts IMStreamParts, final bool
 	}
 	if a.showThinking {
 		if err := a.text(ctx, parts.ExplicitThought, &a.thought, "思考：", final); err != nil {
+			return err
+		}
+	}
+	for _, step := range parts.Progress {
+		sent := a.progress[step.ID]
+		err := a.text(ctx, step.Content, &sent, "", true)
+		a.progress[step.ID] = sent
+		if err != nil {
 			return err
 		}
 	}

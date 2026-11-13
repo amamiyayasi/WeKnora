@@ -46,9 +46,6 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 		"remaining work and explain any missing evidence. Use the user's requested " +
 		"language and format. Do not claim that an unperformed action " +
 		"succeeded.\"}</runtime_event>"
-	if ctx.Value(types.AppendOnlyAnswerContextKey) == true && (e.collaboration == nil || e.collaboration.Child == nil) {
-		runtimeNotice += "\nThis is now the tool-free final delivery stage. Generate the user's complete response directly, not a readiness acknowledgement."
-	}
 	if e.finalAnswerNeedsCompaction(messages, runtimeNotice) {
 		messages, _ = e.compactFinalAnswerContext(ctx, messages, state.CurrentRound+1,
 			runtimeNotice, compaction.ReasonThreshold)
@@ -143,10 +140,14 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 					llmResult.FinishReason, llmResult.Usage.PromptTokens, llmResult.Usage.CompletionTokens)
 			}
 		}
+		if ctx.Value(types.AppendOnlyAnswerContextKey) == true && err != nil && llmResult != nil {
+			state.FinalAnswer = agenttools.StripThinkBlocks(llmResult.Content)
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if err == nil || attempt == 1 || !overflow {
+		// A published append-only answer cannot be replaced by an overflow retry.
+		if err == nil || attempt == 1 || !overflow || (ctx.Value(types.AppendOnlyAnswerContextKey) == true && answerStreamed) {
 			break
 		}
 		logger.Warnf(ctx, "[Agent][FinalAnswer] Context overflow; compacting before one retry: %v", err)
@@ -270,7 +271,9 @@ func (e *AgentEngine) handleMaxIterations(
 		common.PipelineError(ctx, "Agent", "final_answer_failed", map[string]interface{}{
 			"error": err.Error(),
 		})
-		state.FinalAnswer = "Sorry, I was unable to generate a complete answer."
+		if ctx.Value(types.AppendOnlyAnswerContextKey) != true || state.FinalAnswer == "" {
+			state.FinalAnswer = "Sorry, I was unable to generate a complete answer."
+		}
 		state.IsComplete = true
 		return fmt.Errorf("failed to synthesize final answer after max iterations: %w", err)
 	}
