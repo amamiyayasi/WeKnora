@@ -93,3 +93,21 @@ func TestCompletedReplyPacksLinesInsteadOfSendingShortParagraphAlone(t *testing.
 	require.Equal(t, body, strings.Join(parts, ""))
 	require.Equal(t, prefix, nextAppendText(body, false), "live output still waits for complete paragraphs")
 }
+
+func TestAppendReplyFailureCountsOnlyOwnAcceptedChunks(t *testing.T) {
+	calls := 0
+	send := func(context.Context, string) error {
+		calls++
+		if calls == 4 {
+			return errors.New("ret=-2")
+		}
+		return nil
+	}
+	a, b := newAppendReply(&IMChannel{}, send), newAppendReply(&IMChannel{}, send)
+	require.NoError(t, a.flush(context.Background(), IMStreamParts{Progress: []IMProgressStep{{ID: "a", Content: "阶段"}}}, false))
+	require.NoError(t, b.flush(context.Background(), IMStreamParts{Answer: "指令回复"}, true))
+	err := a.flush(context.Background(), IMStreamParts{Answer: strings.Repeat("中", 4001)}, true)
+	require.ErrorContains(t, err, "accepted_chunks=2")
+	require.ErrorContains(t, err, "phase=answer")
+	require.Equal(t, 4, calls)
+}

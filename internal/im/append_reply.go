@@ -71,6 +71,7 @@ type appendReply struct {
 	revision                int
 	progress                map[string]string
 	tools                   map[string]string
+	acceptedChunks          int
 	phase                   string
 	err                     error
 }
@@ -95,9 +96,10 @@ func (a *appendReply) deliver(ctx context.Context, text string) error {
 	}
 	a.err = a.send(ctx, text)
 	if a.err == nil {
+		a.acceptedChunks++
 		logger.Infof(ctx, "[IM] Append chunk sent: runes=%d", len([]rune(text)))
 	} else {
-		a.err = fmt.Errorf("append reply phase=%s: %w", a.phase, a.err)
+		a.err = fmt.Errorf("append reply phase=%s accepted_chunks=%d: %w", a.phase, a.acceptedChunks, a.err)
 		logger.Warnf(ctx, "[IM] Append delivery failed: phase=%s runes=%d error=%v", a.phase, len([]rune(text)), a.err)
 	}
 	return a.err

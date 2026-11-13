@@ -102,10 +102,8 @@ func (a *Adapter) HandleURLVerification(c *gin.Context) bool {
 }
 
 type userDelivery struct {
-	mu            sync.Mutex
-	last          time.Time
-	messageID     string
-	acceptedParts int
+	mu   sync.Mutex
+	last time.Time
 }
 
 // SendChunk serializes messages for this adapter's user, without retrying unknown sends.
@@ -124,14 +122,11 @@ func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, t
 	delivery := value.(*userDelivery)
 	delivery.mu.Lock()
 	defer delivery.mu.Unlock()
-	if delivery.messageID != incoming.MessageID {
-		delivery.messageID = incoming.MessageID
-		delivery.acceptedParts = 0
-	}
 
 	if turn, ok := a.turns.Load(incoming.UserID); ok {
 		turn.(*typingTurn).stop()
 	}
+	acceptedParts := 0
 	for _, part := range im.SplitReplyText(text) {
 		if wait := time.Until(delivery.last.Add(2 * time.Second)); wait > 0 {
 			timer := time.NewTimer(wait)
@@ -147,9 +142,9 @@ func (a *Adapter) SendChunk(ctx context.Context, incoming *im.IncomingMessage, t
 		}
 		delivery.last = time.Now()
 		if err := a.sendText(ctx, incoming, part); err != nil {
-			return fmt.Errorf("wechat delivery accepted_parts=%d part_runes=%d: %w", delivery.acceptedParts, len([]rune(part)), err)
+			return fmt.Errorf("wechat delivery accepted_parts_in_send=%d part_runes=%d: %w", acceptedParts, len([]rune(part)), err)
 		}
-		delivery.acceptedParts++
+		acceptedParts++
 	}
 	return nil
 }
