@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"github.com/Tencent/WeKnora/internal/models/chat"
+	"strings"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/event"
@@ -30,9 +32,8 @@ func TestFinalSynthesisMarksChunksForAppendDelivery(t *testing.T) {
 	require.Equal(t, text, state.FinalAnswer)
 }
 
-func TestAppendOnlyNaturalStopEntersCommittedFinalStage(t *testing.T) {
+func TestAppendOnlyNaturalStopCommitsWithoutAnotherModelCall(t *testing.T) {
 	model := &mockChat{responses: []mockResponse{
-		{chunks: []types.StreamResponse{{Content: "ready", Done: true, FinishReason: "stop"}}},
 		{chunks: []types.StreamResponse{{Content: "第一段\n\n"}, {Content: "第二段", Done: true, FinishReason: "stop"}}},
 	}}
 	e := newTestEngine(t, model)
@@ -53,9 +54,7 @@ func TestAppendOnlyNaturalStopEntersCommittedFinalStage(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "第一段\n\n第二段", state.FinalAnswer)
 	require.Equal(t, state.FinalAnswer, visible)
-	require.Equal(t, 2, model.callCount)
-	require.Equal(t, "none", model.opts[1].ToolChoice)
-	require.Empty(t, model.opts[1].Tools)
+	require.Equal(t, 1, model.callCount)
 }
 
 func TestReplaceableNaturalStopKeepsSingleCall(t *testing.T) {
@@ -78,6 +77,42 @@ func TestAppendOnlyDoesNotRegenerateFilteredOrTruncatedAnswer(t *testing.T) {
 			_, err := e.executeLoop(ctx, state, "question", emptyMessages(), nil, "session", "message")
 			require.NoError(t, err)
 			require.Equal(t, 1, model.callCount)
+		})
+	}
+}
+
+func TestAppendOnlyOverflowAfterPublishedChunkDoesNotRegenerate(t *testing.T) {
+	for _, mode := range []string{"natural", "iteration-budget"} {
+		t.Run(mode, func(t *testing.T) {
+			model := &finalSynthesisChat{}
+			e := newTestEngine(t, model, withMaxContextTokens(64000), withMaxCompletionTokens(2048))
+			model.synthesize = func(context.Context, []chat.Message, *chat.ChatOptions) (<-chan types.StreamResponse, error) {
+				return finalSynthesisChunks(types.StreamResponse{ResponseType: types.ResponseTypeAnswer, Content: "已经发布的第一段\n\n"}, types.StreamResponse{ResponseType: types.ResponseTypeError, Content: "context_length_exceeded", Done: true}), nil
+			}
+			var published string
+			resets := 0
+			e.eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+				d := evt.Data.(event.AgentFinalAnswerData)
+				if d.Replace {
+					resets++
+				}
+				published += d.Content
+				return nil
+			})
+			state := &types.AgentState{}
+			ctx := context.WithValue(context.Background(), types.AppendOnlyAnswerContextKey, true)
+			var err error
+			if mode == "iteration-budget" {
+				err = e.handleMaxIterations(ctx, "question", state, "session", storedHistoryOverflow())
+			} else {
+				err = e.streamFinalAnswerToEventBus(ctx, "question", state, "session", storedHistoryOverflow())
+			}
+			require.Error(t, err)
+			require.Len(t, model.finals, 1)
+			require.Equal(t, 0, model.summaries)
+			require.Zero(t, resets)
+			require.Equal(t, "已经发布的第一段\n\n", published)
+			require.Equal(t, strings.TrimSpace(published), state.FinalAnswer)
 		})
 	}
 }

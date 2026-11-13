@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
@@ -2575,6 +2576,7 @@ func (s *Service) handleMessageOutput(ctx context.Context, msg *IncomingMessage,
 		agentToolIdx  = make(map[string]int)
 		pipelineIdx   = make(map[string]int)
 
+		progressSteps     []IMProgressStep
 		agentToolSteps    []IMToolStep
 		pipelineToolSteps []IMToolStep
 
@@ -2623,6 +2625,7 @@ func (s *Service) handleMessageOutput(ctx context.Context, msg *IncomingMessage,
 		}
 		return IMStreamParts{
 			Mode:              mode,
+			Progress:          append([]IMProgressStep(nil), progressSteps...),
 			PipelineToolSteps: append([]IMToolStep(nil), pipelineToolSteps...),
 			ReasoningInner:    reasoningInner.text.String(),
 			AgentInner:        agentInner.text.String(),
@@ -2633,6 +2636,27 @@ func (s *Service) handleMessageOutput(ctx context.Context, msg *IncomingMessage,
 			AnswerRevision:    answerRevision,
 		}
 	}
+
+	eventBus.On(event.EventAgentProgress, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentProgressData)
+		if appendOutput == nil || !ok || strings.TrimSpace(data.Content) == "" {
+			return nil
+		}
+		id := evt.ID
+		if id == "" {
+			id = fmt.Sprintf("progress-%d", data.Iteration)
+		}
+		bufMu.Lock()
+		defer bufMu.Unlock()
+		for i := range progressSteps {
+			if progressSteps[i].ID == id {
+				progressSteps[i].Content = data.Content
+				return nil
+			}
+		}
+		progressSteps = append(progressSteps, IMProgressStep{ID: id, Content: data.Content})
+		return nil
+	})
 
 	// Subscribe to answer chunks.
 	eventBus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
@@ -2927,7 +2951,7 @@ func (s *Service) handleMessageOutput(ctx context.Context, msg *IncomingMessage,
 			if failed || qaCtx.Err() != nil {
 				return
 			}
-			parts.Answer = FormatIMDisplayContent(parts.Answer, StreamDisplayFinal)
+			parts.Answer = strings.TrimLeftFunc(stripThinkBlocks(parts.Answer), unicode.IsSpace)
 			if cut := holdbackCutoff(parts.Answer); cut < len(parts.Answer) {
 				parts.Answer = parts.Answer[:cut]
 			}

@@ -33,12 +33,17 @@ func IsRAGPipelineToolName(name string) bool {
 
 // StripThinkBlocks removes <think> blocks for final IM display.
 func StripThinkBlocks(content string) string {
+	return trimIMOuterWhitespace(stripThinkBlocks(content))
+}
+
+// Keep paragraph boundaries while an append-only answer is still growing.
+func stripThinkBlocks(content string) string {
 	if content == "" {
 		return ""
 	}
 	cleaned := thinkBlockRe.ReplaceAllString(content, "")
 	cleaned = thinkOpenTailRe.ReplaceAllString(cleaned, "")
-	return trimIMOuterWhitespace(cleaned)
+	return cleaned
 }
 
 // IMStreamMode distinguishes agent reasoning from quick-QA RAG pipeline display.
@@ -49,8 +54,14 @@ const (
 	IMStreamModeQuickQA
 )
 
+type IMProgressStep struct {
+	ID      string
+	Content string
+}
+
 // IMStreamParts separates stream content for IM display.
 type IMStreamParts struct {
+	Progress        []IMProgressStep
 	AnswerRevision  int
 	ExplicitThought string // Explicit model thought events only, never retracted answer text.
 	Mode            IMStreamMode
