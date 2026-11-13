@@ -3,6 +3,7 @@ package im
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -37,6 +38,14 @@ func nextAppendText(text string, final bool) string {
 		runes = runes[:appendTextLimit]
 	}
 	window := string(runes)
+	if final && len(window) < len(text) {
+		// Completed text packs to the nearest boundary, matching Octop's client policy.
+		cut := max(strings.LastIndex(window, "\n"), strings.LastIndex(window, " "))
+		if cut >= 0 {
+			return window[:cut+1]
+		}
+		return window
+	}
 	if !final || len(window) < len(text) {
 		if cut := strings.LastIndex(window, "\n\n"); cut >= 0 {
 			return window[:cut+2]
@@ -62,6 +71,7 @@ type appendReply struct {
 	revision                int
 	progress                map[string]string
 	tools                   map[string]string
+	phase                   string
 	err                     error
 }
 
@@ -86,6 +96,9 @@ func (a *appendReply) deliver(ctx context.Context, text string) error {
 	a.err = a.send(ctx, text)
 	if a.err == nil {
 		logger.Infof(ctx, "[IM] Append chunk sent: runes=%d", len([]rune(text)))
+	} else {
+		a.err = fmt.Errorf("append reply phase=%s: %w", a.phase, a.err)
+		logger.Warnf(ctx, "[IM] Append delivery failed: phase=%s runes=%d error=%v", a.phase, len([]rune(text)), a.err)
 	}
 	return a.err
 }
@@ -135,11 +148,13 @@ func (a *appendReply) flush(ctx context.Context, parts IMStreamParts, final bool
 		a.answer = ""
 		a.revision = parts.AnswerRevision
 	}
+	a.phase = "thinking"
 	if a.showThinking {
 		if err := a.text(ctx, parts.ExplicitThought, &a.thought, "思考：", final); err != nil {
 			return err
 		}
 	}
+	a.phase = "progress"
 	for _, step := range parts.Progress {
 		sent := a.progress[step.ID]
 		err := a.text(ctx, step.Content, &sent, "", true)
@@ -148,6 +163,7 @@ func (a *appendReply) flush(ctx context.Context, parts IMStreamParts, final bool
 			return err
 		}
 	}
+	a.phase = "tools"
 	if a.showTools {
 		for _, step := range append(append([]IMToolStep(nil), parts.PipelineToolSteps...), parts.AgentToolSteps...) {
 			if !isToolVisibleToUser(step.ToolName) {
@@ -173,6 +189,7 @@ func (a *appendReply) flush(ctx context.Context, parts IMStreamParts, final bool
 			a.tools[step.ToolCallID] = status
 		}
 	}
+	a.phase = "answer"
 	return a.text(ctx, parts.Answer, &a.answer, "", final)
 }
 
@@ -183,5 +200,6 @@ func (a *appendReply) fail(ctx context.Context, err error) error {
 		return a.err
 	}
 	a.err = nil
+	a.phase = "error"
 	return a.deliver(ctx, imQAFailureReply(err))
 }
