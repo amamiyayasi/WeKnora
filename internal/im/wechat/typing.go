@@ -11,17 +11,19 @@ import (
 )
 
 type typingTurn struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	cancel    context.CancelFunc
+	done      chan struct{}
+	wake      chan struct{}
+	messageID string
+	once      sync.Once
 }
 
 func (t *typingTurn) stop() { t.once.Do(t.cancel); <-t.done }
 
-// BeginReply owns one turn's typing light; visible content stops it first.
+// BeginReply keeps typing active until the entire QA and outbound delivery finish.
 func (a *Adapter) BeginReply(ctx context.Context, msg *im.IncomingMessage) func() {
 	ctx, cancel := context.WithCancel(ctx)
-	turn := &typingTurn{cancel: cancel, done: make(chan struct{})}
+	turn := &typingTurn{cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), messageID: msg.MessageID}
 	if old, loaded := a.turns.Swap(msg.UserID, turn); loaded {
 		old.(*typingTurn).stop()
 	}
@@ -33,26 +35,27 @@ func (a *Adapter) BeginReply(ctx context.Context, msg *im.IncomingMessage) func(
 		defer close(turn.done)
 		defer stopChannel()
 		defer a.turns.CompareAndDelete(msg.UserID, turn)
-		started, warned := false, false
+		attempted, warned := false, false
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
 			if ctx.Err() == nil {
+				attempted = true
 				err := a.setTyping(ctx, msg, 1)
-				if err == nil {
-					started = true
-				} else if !warned {
+				if err != nil && !warned {
 					logger.Warn(ctx, "[WeChat] Typing indicator unavailable")
 					warned = true
 				}
 			}
 			select {
 			case <-ctx.Done():
-				if started {
+				if attempted {
 					_ = a.setTyping(context.WithoutCancel(ctx), msg, 2)
 				}
 				return
 			case <-ticker.C:
+			case <-turn.wake:
+				ticker.Reset(5 * time.Second)
 			}
 		}
 	}()
